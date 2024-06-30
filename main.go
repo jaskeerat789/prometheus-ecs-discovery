@@ -39,17 +39,17 @@ import (
 )
 
 type labels struct {
-	TaskArn       string `yaml:"task_arn"`
-	TaskName      string `yaml:"task_name"`
-	JobName       string `yaml:"job,omitempty"`
-	TaskRevision  string `yaml:"task_revision"`
-	TaskGroup     string `yaml:"task_group"`
-	ClusterArn    string `yaml:"cluster_arn"`
-	ContainerName string `yaml:"container_name"`
-	ContainerArn  string `yaml:"container_arn"`
-	DockerImage   string `yaml:"docker_image"`
-	MetricsPath   string `yaml:"__metrics_path__,omitempty"`
-	Scheme        string `yaml:"__scheme__,omitempty"`
+	TaskArn       string `yaml:"task_arn" json:"task_arn"`
+	TaskName      string `yaml:"task_name" json:"task_name"`
+	JobName       string `yaml:"job,omitempty" json:"job,omitempty"`
+	TaskRevision  string `yaml:"task_revision" json:"task_revision"`
+	TaskGroup     string `yaml:"task_group" json:"task_group"`
+	ClusterArn    string `yaml:"cluster_arn" json:"cluster_arn"`
+	ContainerName string `yaml:"container_name" json:"container_name"`
+	ContainerArn  string `yaml:"container_arn" json:"container_arn"`
+	DockerImage   string `yaml:"docker_image" json:"docker_image"`
+	MetricsPath   string `yaml:"__metrics_path__,omitempty" json:"__metrics_path__,omitempty"`
+	Scheme        string `yaml:"__scheme__,omitempty" json:"__scheme__,omitempty"`
 }
 
 // Docker label for enabling dynamic port detection
@@ -68,7 +68,7 @@ var prometheusServerNameLabel = flag.String("config.server-name-label", "PROMETH
 var prometheusJobNameLabel = flag.String("config.job-name-label", "PROMETHEUS_EXPORTER_JOB_NAME", "Docker label to define the job name")
 var prometheusDynamicPortDetection = flag.Bool("config.dynamic-port-detection", false, fmt.Sprintf("If true, only tasks with the Docker label %s=1 will be scraped", dynamicPortLabel))
 var httpServer = flag.Bool("config.http-server", false, fmt.Sprintf("If true, host a HTTP server for http_sd_config"))
-var httpPort = flag.Int64("cofnig.http-port", 8000, fmt.Sprintf("port for HTTP server"))
+var httpPort = flag.Int("cofnig.http-port", 8000, fmt.Sprintf("port for HTTP server"))
 var noFile = flag.Bool("config.no-file", false, fmt.Sprintf("don't create config file"))
 
 // logError is a convenience function that decodes all possible ECS
@@ -125,8 +125,8 @@ type PrometheusContainer struct {
 // PrometheusTaskInfo is the final structure that will be
 // output as a Prometheus file service discovery config.
 type PrometheusTaskInfo struct {
-	Targets []string `yaml:"targets"`
-	Labels  labels   `yaml:"labels"`
+	Targets []string `yaml:"targets" json:"targets"`
+	Labels  labels   `yaml:"labels" json:"labels"`
 }
 
 type SDConfig struct {
@@ -668,7 +668,7 @@ func (sdc *SDConfig) SDConfigFile() {
 	}
 }
 
-func (sdc *SDConfig) mainHandler(rw http.ResponseWriter, r *http.Request) {
+func (sdc *SDConfig) sdHandler(rw http.ResponseWriter, r *http.Request) {
 	rw.Header().Set("Content-Type", "json")
 	json.NewEncoder(rw).Encode(sdc.Config)
 }
@@ -697,6 +697,14 @@ func main() {
 	svcec2 := ec2.NewFromConfig(config)
 	sdc := &SDConfig{}
 
+	if *httpServer {
+		port := ":" + strconv.Itoa(*httpPort)
+		http.HandleFunc("/", sdc.sdHandler)
+		go func() {
+			fmt.Printf("HTTP service running on port %d\n", *httpPort)
+			http.ListenAndServe(port, nil)
+		}()
+	}
 	s := time.NewTimer(1 * time.Millisecond)
 	t := time.NewTicker(*interval)
 	n := *times
@@ -706,6 +714,9 @@ func main() {
 		case <-t.C:
 		}
 		sdc.makeSD(svc, svcec2)
+		if !*noFile {
+			sdc.SDConfigFile()
+		}
 		n = n - 1
 		if *times > 0 && n == 0 {
 			break
