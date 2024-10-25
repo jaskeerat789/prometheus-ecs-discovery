@@ -670,6 +670,7 @@ func (sdc *SDConfig) SDConfigFile() {
 
 func (sdc *SDConfig) sdHandler(rw http.ResponseWriter, r *http.Request) {
 	rw.Header().Set("Content-Type", "json")
+  rw.Header().Set("X-Prometheus-Refresh-Interval-Seconds","60")
 	json.NewEncoder(rw).Encode(sdc.Config)
 }
 
