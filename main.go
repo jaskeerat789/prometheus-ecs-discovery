@@ -68,7 +68,7 @@ var prometheusServerNameLabel = flag.String("config.server-name-label", "PROMETH
 var prometheusJobNameLabel = flag.String("config.job-name-label", "PROMETHEUS_EXPORTER_JOB_NAME", "Docker label to define the job name")
 var prometheusDynamicPortDetection = flag.Bool("config.dynamic-port-detection", false, fmt.Sprintf("If true, only tasks with the Docker label %s=1 will be scraped", dynamicPortLabel))
 var httpServer = flag.Bool("config.http-server", false, fmt.Sprintf("If true, host a HTTP server for http_sd_config"))
-var httpPort = flag.Int("cofnig.http-port", 8000, fmt.Sprintf("port for HTTP server"))
+var httpPort = flag.Int("config.http-port", 8000, fmt.Sprintf("port for HTTP server"))
 var noFile = flag.Bool("config.no-file", false, fmt.Sprintf("don't create config file"))
 
 // logError is a convenience function that decodes all possible ECS
