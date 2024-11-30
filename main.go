@@ -16,11 +16,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
+	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -37,17 +39,17 @@ import (
 )
 
 type labels struct {
-	TaskArn       string `yaml:"task_arn"`
-	TaskName      string `yaml:"task_name"`
-	JobName       string `yaml:"job,omitempty"`
-	TaskRevision  string `yaml:"task_revision"`
-	TaskGroup     string `yaml:"task_group"`
-	ClusterArn    string `yaml:"cluster_arn"`
-	ContainerName string `yaml:"container_name"`
-	ContainerArn  string `yaml:"container_arn"`
-	DockerImage   string `yaml:"docker_image"`
-	MetricsPath   string `yaml:"__metrics_path__,omitempty"`
-	Scheme        string `yaml:"__scheme__,omitempty"`
+	TaskArn       string `yaml:"task_arn" json:"task_arn"`
+	TaskName      string `yaml:"task_name" json:"task_name"`
+	JobName       string `yaml:"job,omitempty" json:"job,omitempty"`
+	TaskRevision  string `yaml:"task_revision" json:"task_revision"`
+	TaskGroup     string `yaml:"task_group" json:"task_group"`
+	ClusterArn    string `yaml:"cluster_arn" json:"cluster_arn"`
+	ContainerName string `yaml:"container_name" json:"container_name"`
+	ContainerArn  string `yaml:"container_arn" json:"container_arn"`
+	DockerImage   string `yaml:"docker_image" json:"docker_image"`
+	MetricsPath   string `yaml:"__metrics_path__,omitempty" json:"__metrics_path__,omitempty"`
+	Scheme        string `yaml:"__scheme__,omitempty" json:"__scheme__,omitempty"`
 }
 
 // Docker label for enabling dynamic port detection
@@ -60,11 +62,14 @@ var times = flag.Int("config.scrape-times", 0, "how many times to scrape before 
 var roleArn = flag.String("config.role-arn", "", "ARN of the role to assume when scraping the AWS API (optional)")
 var prometheusPortLabel = flag.String("config.port-label", "PROMETHEUS_EXPORTER_PORT", "Docker label to define the scrape port of the application (if missing an application won't be scraped)")
 var prometheusPathLabel = flag.String("config.path-label", "PROMETHEUS_EXPORTER_PATH", "Docker label to define the scrape path of the application")
-var prometheusSchemeLabel= flag.String("config.scheme-label", "PROMETHEUS_EXPORTER_SCHEME", "Docker label to define the scheme of the target application")
+var prometheusSchemeLabel = flag.String("config.scheme-label", "PROMETHEUS_EXPORTER_SCHEME", "Docker label to define the scheme of the target application")
 var prometheusFilterLabel = flag.String("config.filter-label", "", "Docker label (and optionally value) to require to scrape the application")
 var prometheusServerNameLabel = flag.String("config.server-name-label", "PROMETHEUS_EXPORTER_SERVER_NAME", "Docker label to define the server name")
 var prometheusJobNameLabel = flag.String("config.job-name-label", "PROMETHEUS_EXPORTER_JOB_NAME", "Docker label to define the job name")
 var prometheusDynamicPortDetection = flag.Bool("config.dynamic-port-detection", false, fmt.Sprintf("If true, only tasks with the Docker label %s=1 will be scraped", dynamicPortLabel))
+var httpServer = flag.Bool("config.http-server", false, fmt.Sprintf("If true, host a HTTP server for http_sd_config"))
+var httpPort = flag.Int("config.http-port", 8000, fmt.Sprintf("port for HTTP server"))
+var noFile = flag.Bool("config.no-file", false, fmt.Sprintf("don't create config file"))
 
 // logError is a convenience function that decodes all possible ECS
 // errors and displays them to standard error.
@@ -120,8 +125,12 @@ type PrometheusContainer struct {
 // PrometheusTaskInfo is the final structure that will be
 // output as a Prometheus file service discovery config.
 type PrometheusTaskInfo struct {
-	Targets []string `yaml:"targets"`
-	Labels  labels   `yaml:"labels"`
+	Targets []string `yaml:"targets" json:"targets"`
+	Labels  labels   `yaml:"labels" json:"labels"`
+}
+
+type SDConfig struct {
+	Config []*PrometheusTaskInfo
 }
 
 // ExporterInformation returns a list of []*PrometheusTaskInfo
@@ -131,25 +140,26 @@ type PrometheusTaskInfo struct {
 // container in the task has a PROMETHEUS_EXPORTER_PORT
 //
 // Example:
-//     ...
-//             "Name": "apache",
-//             "DockerLabels": {
-//                  "PROMETHEUS_EXPORTER_PORT": "1234"
-//              },
-//     ...
-//              "PortMappings": [
-//                {
-//                  "ContainerPort": 1883,
-//                  "HostPort": 0,
-//                  "Protocol": "tcp"
-//                },
-//                {
-//                  "ContainerPort": 1234,
-//                  "HostPort": 0,
-//                  "Protocol": "tcp"
-//                }
-//              ],
-//     ...
+//
+//	...
+//	        "Name": "apache",
+//	        "DockerLabels": {
+//	             "PROMETHEUS_EXPORTER_PORT": "1234"
+//	         },
+//	...
+//	         "PortMappings": [
+//	           {
+//	             "ContainerPort": 1883,
+//	             "HostPort": 0,
+//	             "Protocol": "tcp"
+//	           },
+//	           {
+//	             "ContainerPort": 1234,
+//	             "HostPort": 0,
+//	             "Protocol": "tcp"
+//	           }
+//	         ],
+//	...
 func (t *AugmentedTask) ExporterInformation() []*PrometheusTaskInfo {
 	ret := []*PrometheusTaskInfo{}
 	var host string
@@ -297,7 +307,7 @@ func (t *AugmentedTask) ExporterInformation() []*PrometheusTaskInfo {
 
 		scheme, ok = d.DockerLabels[*prometheusSchemeLabel]
 		if ok {
-		    labels.Scheme = scheme
+			labels.Scheme = scheme
 		}
 
 		ret = append(ret, &PrometheusTaskInfo{
@@ -601,6 +611,69 @@ func GetAugmentedTasks(svc *ecs.Client, svcec2 *ec2.Client, clusterArns []*strin
 	return tasks, nil
 }
 
+func (sdc *SDConfig) makeSD(svc *ecs.Client, svcec2 *ec2.Client) {
+	var clusters *ecs.ListClustersOutput
+
+	if *cluster != "" {
+		res, err := svc.DescribeClusters(context.Background(), &ecs.DescribeClustersInput{
+			Clusters: []string{*cluster},
+		})
+		if err != nil {
+			logError(err)
+			return
+		}
+
+		if len(res.Clusters) == 0 {
+			logError(fmt.Errorf("%s cluster not found", *cluster))
+			return
+		}
+
+		clusters = &ecs.ListClustersOutput{
+			ClusterArns: []string{*cluster},
+		}
+	} else {
+		c, err := GetClusters(svc)
+		if err != nil {
+			logError(err)
+			return
+		}
+		clusters = c
+	}
+
+	tasks, err := GetAugmentedTasks(svc, svcec2, StringToStarString(clusters.ClusterArns))
+	if err != nil {
+		logError(err)
+		return
+	}
+	infos := []*PrometheusTaskInfo{}
+	for _, t := range tasks {
+		info := t.ExporterInformation()
+		infos = append(infos, info...)
+	}
+	sdc.Config = infos
+
+}
+
+func (sdc *SDConfig) SDConfigFile() {
+	m, err := yaml.Marshal(sdc.Config)
+	if err != nil {
+		logError(err)
+		return
+	}
+	log.Printf("Writing %d discovered exporters to %s", len(sdc.Config), *outFile)
+	err = os.WriteFile(*outFile, m, 0644)
+	if err != nil {
+		logError(err)
+		return
+	}
+}
+
+func (sdc *SDConfig) sdHandler(rw http.ResponseWriter, r *http.Request) {
+	rw.Header().Set("Content-Type", "json")
+  rw.Header().Set("X-Prometheus-Refresh-Interval-Seconds","60")
+	json.NewEncoder(rw).Encode(sdc.Config)
+}
+
 func main() {
 	flag.Parse()
 
@@ -616,61 +689,22 @@ func main() {
 		config.Credentials = stscreds.NewAssumeRoleProvider(stsSvc, *roleArn)
 	}
 
+	if *noFile && !*httpServer {
+		logError(fmt.Errorf("one of either file or http mode needs to enabled"))
+	}
+
 	// Initialise AWS Service clients
 	svc := ecs.NewFromConfig(config)
 	svcec2 := ec2.NewFromConfig(config)
+	sdc := &SDConfig{}
 
-	work := func() {
-		var clusters *ecs.ListClustersOutput
-
-		if *cluster != "" {
-			res, err := svc.DescribeClusters(context.Background(), &ecs.DescribeClustersInput{
-				Clusters: []string{*cluster},
-			})
-			if err != nil {
-				logError(err)
-				return
-			}
-
-			if len(res.Clusters) == 0 {
-				logError(fmt.Errorf("%s cluster not found", *cluster))
-				return
-			}
-
-			clusters = &ecs.ListClustersOutput{
-				ClusterArns: []string{*cluster},
-			}
-		} else {
-			c, err := GetClusters(svc)
-			if err != nil {
-				logError(err)
-				return
-			}
-			clusters = c
-
-		}
-
-		tasks, err := GetAugmentedTasks(svc, svcec2, StringToStarString(clusters.ClusterArns))
-		if err != nil {
-			logError(err)
-			return
-		}
-		infos := []*PrometheusTaskInfo{}
-		for _, t := range tasks {
-			info := t.ExporterInformation()
-			infos = append(infos, info...)
-		}
-		m, err := yaml.Marshal(infos)
-		if err != nil {
-			logError(err)
-			return
-		}
-		log.Printf("Writing %d discovered exporters to %s", len(infos), *outFile)
-		err = ioutil.WriteFile(*outFile, m, 0644)
-		if err != nil {
-			logError(err)
-			return
-		}
+	if *httpServer {
+		port := ":" + strconv.Itoa(*httpPort)
+		http.HandleFunc("/", sdc.sdHandler)
+		go func() {
+			fmt.Printf("HTTP service running on port %d\n", *httpPort)
+			http.ListenAndServe(port, nil)
+		}()
 	}
 	s := time.NewTimer(1 * time.Millisecond)
 	t := time.NewTicker(*interval)
@@ -680,7 +714,10 @@ func main() {
 		case <-s.C:
 		case <-t.C:
 		}
-		work()
+		sdc.makeSD(svc, svcec2)
+		if !*noFile {
+			sdc.SDConfigFile()
+		}
 		n = n - 1
 		if *times > 0 && n == 0 {
 			break
